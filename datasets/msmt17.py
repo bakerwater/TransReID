@@ -27,6 +27,23 @@ class MSMT17(BaseImageDataset):
         super(MSMT17, self).__init__()
         self.pid_begin = pid_begin
         self.dataset_dir = osp.join(root, self.dataset_dir)
+        # Also support the common Market-style conversion of MSMT17.
+        converted_dir = self.dataset_dir
+        if osp.isdir(osp.join(converted_dir, 'images', 'bounding_box_train')):
+            converted_dir = osp.join(converted_dir, 'images')
+        if osp.isdir(osp.join(converted_dir, 'bounding_box_train')):
+            self.train = self._process_converted_dir(
+                osp.join(converted_dir, 'bounding_box_train'), relabel=True)
+            self.query = self._process_converted_dir(osp.join(converted_dir, 'query'))
+            self.gallery = self._process_converted_dir(osp.join(converted_dir, 'bounding_box_test'))
+            if verbose:
+                print('=> MSMT17 loaded (Market-style layout)')
+                self.print_dataset_statistics(self.train, self.query, self.gallery)
+            for name in ('train', 'query', 'gallery'):
+                info = self.get_imagedata_info(getattr(self, name))
+                for field, value in zip(('pids', 'imgs', 'cams', 'vids'), info):
+                    setattr(self, 'num_{}_{}'.format(name, field), value)
+            return
         self.train_dir = osp.join(self.dataset_dir, 'train')
         self.test_dir = osp.join(self.dataset_dir, 'test')
         self.list_train_path = osp.join(self.dataset_dir, 'list_train.txt')
@@ -51,6 +68,28 @@ class MSMT17(BaseImageDataset):
         self.num_train_pids, self.num_train_imgs, self.num_train_cams, self.num_train_vids = self.get_imagedata_info(self.train)
         self.num_query_pids, self.num_query_imgs, self.num_query_cams, self.num_query_vids = self.get_imagedata_info(self.query)
         self.num_gallery_pids, self.num_gallery_imgs, self.num_gallery_cams, self.num_gallery_vids = self.get_imagedata_info(self.gallery)
+    def _process_converted_dir(self, dir_path, relabel=False):
+        if not osp.isdir(dir_path):
+            raise RuntimeError("'{}' is not available".format(dir_path))
+        paths = sorted(glob.glob(osp.join(dir_path, '*.jpg')))
+        if not paths:
+            raise RuntimeError("No JPEG images found in '{}'".format(dir_path))
+        pattern = re.compile(r'^(-?\d+)_c(\d+)_')
+        records = []
+        for path in paths:
+            match = pattern.match(osp.basename(path))
+            if match is None:
+                raise ValueError('Unrecognized MSMT17 image name: {}'.format(path))
+            pid, camera = map(int, match.groups())
+            if pid == -1:
+                continue
+            if pid < 0 or not 1 <= camera <= 15:
+                raise ValueError('Invalid MSMT17 identity/camera: {}'.format(path))
+            records.append((path, pid, camera - 1, 1))
+        labels = {pid: label for label, pid in enumerate(sorted({r[1] for r in records}))}
+        return [(path, self.pid_begin + (labels[pid] if relabel else pid), cam, view)
+                for path, pid, cam, view in records]
+
     def _check_before_run(self):
         """Check if all files are available before going deeper"""
         if not osp.exists(self.dataset_dir):

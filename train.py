@@ -48,7 +48,10 @@ if __name__ == '__main__':
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    logger = setup_logger("transreid", output_dir, if_train=True)
+    logger = setup_logger("transreid", output_dir, if_train=True, resume=bool(cfg.SOLVER.RESUME))
+    if output_dir:
+        with open(os.path.join(output_dir, 'config.yml'), 'w') as handle:
+            handle.write(cfg.dump())
     logger.info("Saving model in the path :{}".format(cfg.OUTPUT_DIR))
     logger.info(args)
 

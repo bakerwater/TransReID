@@ -68,6 +68,18 @@ _C.MODEL.SIE_COE = 3.0
 _C.MODEL.SIE_CAMERA = False
 _C.MODEL.SIE_VIEW = False
 
+# Auxiliary camera classification branch (A1)
+_C.MODEL.CAMERA_BRANCH = False
+_C.MODEL.CAMERA_BRANCH_DIM = 768
+_C.MODEL.CAMERA_BRANCH_DROPOUT = 0.1
+_C.MODEL.CAMERA_LOSS_WEIGHT = 0.1
+
+# Camera-adversarial learning (A2-1)
+_C.MODEL.CAMERA_GRL = False
+_C.MODEL.ADV_LOSS_WEIGHT = 0.1
+_C.MODEL.GRL_WARMUP_EPOCHS = 5
+_C.MODEL.GRL_MAX_ALPHA = 1.0
+
 # -----------------------------------------------------------------------------
 # INPUT
 # -----------------------------------------------------------------------------
@@ -112,6 +124,7 @@ _C.DATALOADER.NUM_INSTANCE = 16
 # Solver
 # ---------------------------------------------------------------------------- #
 _C.SOLVER = CN()
+_C.SOLVER.RESUME = ''
 # Name of optimizer
 _C.SOLVER.OPTIMIZER_NAME = "Adam"
 # Number of max epoches

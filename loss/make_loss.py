@@ -12,6 +12,18 @@ from .center_loss import CenterLoss
 
 def make_loss(cfg, num_classes):    # modified by gu
     sampler = cfg.DATALOADER.SAMPLER
+    camera_grl_enabled = bool(getattr(cfg.MODEL, 'CAMERA_GRL', False))
+    if camera_grl_enabled:
+        camera_loss_weight = float(getattr(cfg.MODEL, 'ADV_LOSS_WEIGHT', 0.1))
+    else:
+        camera_loss_weight = float(getattr(cfg.MODEL, 'CAMERA_LOSS_WEIGHT', 0.1))
+
+    def add_camera_loss(base_loss, camera_score, target_cam):
+        if camera_score is None:
+            return base_loss
+        camera_loss = F.cross_entropy(camera_score, target_cam)
+        return base_loss + camera_loss_weight * camera_loss
+
     feat_dim = 2048
     center_criterion = CenterLoss(num_classes=num_classes, feat_dim=feat_dim, use_gpu=True)  # center loss
     if 'triplet' in cfg.MODEL.METRIC_LOSS_TYPE:
@@ -30,11 +42,11 @@ def make_loss(cfg, num_classes):    # modified by gu
         print("label smooth on, numclasses:", num_classes)
 
     if sampler == 'softmax':
-        def loss_func(score, feat, target):
-            return F.cross_entropy(score, target)
+        def loss_func(score, feat, target, target_cam=None, camera_score=None):
+            return add_camera_loss(F.cross_entropy(score, target), camera_score, target_cam)
 
     elif cfg.DATALOADER.SAMPLER == 'softmax_triplet':
-        def loss_func(score, feat, target, target_cam):
+        def loss_func(score, feat, target, target_cam, camera_score=None):
             if cfg.MODEL.METRIC_LOSS_TYPE == 'triplet':
                 if cfg.MODEL.IF_LABELSMOOTH == 'on':
                     if isinstance(score, list):
@@ -51,8 +63,9 @@ def make_loss(cfg, num_classes):    # modified by gu
                     else:
                             TRI_LOSS = triplet(feat, target)[0]
 
-                    return cfg.MODEL.ID_LOSS_WEIGHT * ID_LOSS + \
-                               cfg.MODEL.TRIPLET_LOSS_WEIGHT * TRI_LOSS
+                    base_loss = (cfg.MODEL.ID_LOSS_WEIGHT * ID_LOSS
+                                 + cfg.MODEL.TRIPLET_LOSS_WEIGHT * TRI_LOSS)
+                    return add_camera_loss(base_loss, camera_score, target_cam)
                 else:
                     if isinstance(score, list):
                         ID_LOSS = [F.cross_entropy(scor, target) for scor in score[1:]]
@@ -68,8 +81,9 @@ def make_loss(cfg, num_classes):    # modified by gu
                     else:
                             TRI_LOSS = triplet(feat, target)[0]
 
-                    return cfg.MODEL.ID_LOSS_WEIGHT * ID_LOSS + \
-                               cfg.MODEL.TRIPLET_LOSS_WEIGHT * TRI_LOSS
+                    base_loss = (cfg.MODEL.ID_LOSS_WEIGHT * ID_LOSS
+                                 + cfg.MODEL.TRIPLET_LOSS_WEIGHT * TRI_LOSS)
+                    return add_camera_loss(base_loss, camera_score, target_cam)
             else:
                 print('expected METRIC_LOSS_TYPE should be triplet'
                       'but got {}'.format(cfg.MODEL.METRIC_LOSS_TYPE))

@@ -1,0 +1,10 @@
+# Official CUDA wheels; install after creating the Python 3.10 Conda environment.
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+timm==0.4.12
+numpy==1.26.4
+yacs==0.1.8
+Pillow==10.4.0
+PyYAML==6.0.2
+opencv-python-headless==4.10.0.84

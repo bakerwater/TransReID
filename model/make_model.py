@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from .backbones.resnet import ResNet, Bottleneck
+from .grl import GradientReversal
 import copy
 from .backbones.vit_pytorch import vit_base_patch16_224_TransReID, vit_small_patch16_224_TransReID, deit_small_patch16_224_TransReID
 from loss.metric_learning import Arcface, Cosface, AMSoftmax, CircleLoss
@@ -224,6 +225,8 @@ class build_transformer_local(nn.Module):
 
         print('using Transformer_type: {} as a backbone'.format(cfg.MODEL.TRANSFORMER_TYPE))
 
+        self.num_cameras = int(camera_num)
+
         if cfg.MODEL.SIE_CAMERA:
             camera_num = camera_num
         else:
@@ -297,6 +300,37 @@ class build_transformer_local(nn.Module):
         self.bottleneck_4.bias.requires_grad_(False)
         self.bottleneck_4.apply(weights_init_kaiming)
 
+        # Camera Branch
+        self.camera_branch_enabled = bool(
+            getattr(cfg.MODEL, 'CAMERA_BRANCH', False)
+        )
+        self.camera_grl_enabled = bool(getattr(cfg.MODEL, 'CAMERA_GRL', False))
+        if self.camera_grl_enabled and not self.camera_branch_enabled:
+            raise ValueError("CAMERA_GRL=True requires CAMERA_BRANCH=True")
+        self.camera_grl = GradientReversal()
+
+        if self.camera_branch_enabled:
+
+            camera_branch_dim = cfg.MODEL.CAMERA_BRANCH_DIM
+            camera_branch_dropout = cfg.MODEL.CAMERA_BRANCH_DROPOUT
+
+            self.camera_branch = nn.Sequential(
+                nn.Linear(self.in_planes * 5, camera_branch_dim),
+                nn.BatchNorm1d(camera_branch_dim),
+                nn.ReLU(inplace=True),
+                nn.Dropout(p=camera_branch_dropout)
+            )
+
+            self.camera_branch.apply(weights_init_kaiming)
+
+            self.camera_classifier = nn.Linear(
+                camera_branch_dim,
+                self.num_cameras,
+                bias=False
+            )
+
+            self.camera_classifier.apply(weights_init_classifier)
+
         self.shuffle_groups = cfg.MODEL.SHUFFLE_GROUP
         print('using shuffle_groups size:{}'.format(self.shuffle_groups))
         self.shift_num = cfg.MODEL.SHIFT_NUM
@@ -305,7 +339,7 @@ class build_transformer_local(nn.Module):
         print('using divide_length size:{}'.format(self.divide_length))
         self.rearrange = rearrange
 
-    def forward(self, x, label=None, cam_label= None, view_label=None):  # label is unused if self.cos_layer == 'no'
+    def forward(self, x, label=None, cam_label=None, view_label=None, grl_alpha=1.0):
 
         features = self.base(x, cam_label=cam_label, view_label=view_label)
 
@@ -349,6 +383,21 @@ class build_transformer_local(nn.Module):
         local_feat_3_bn = self.bottleneck_3(local_feat_3)
         local_feat_4_bn = self.bottleneck_4(local_feat_4)
 
+        camera_score = None
+        if self.training and self.camera_branch_enabled:
+            if self.neck_feat == 'after':
+                camera_input = torch.cat(
+                    [feat, local_feat_1_bn / 4, local_feat_2_bn / 4,
+                     local_feat_3_bn / 4, local_feat_4_bn / 4], dim=1)
+            else:
+                camera_input = torch.cat(
+                    [global_feat, local_feat_1 / 4, local_feat_2 / 4,
+                     local_feat_3 / 4, local_feat_4 / 4], dim=1)
+            if self.camera_grl_enabled:
+                camera_input = self.camera_grl(camera_input, alpha=grl_alpha)
+            camera_feat = self.camera_branch(camera_input)
+            camera_score = self.camera_classifier(camera_feat)
+
         if self.training:
             if self.ID_LOSS_TYPE in ('arcface', 'cosface', 'amsoftmax', 'circle'):
                 cls_score = self.classifier(feat, label)
@@ -358,10 +407,11 @@ class build_transformer_local(nn.Module):
                 cls_score_2 = self.classifier_2(local_feat_2_bn)
                 cls_score_3 = self.classifier_3(local_feat_3_bn)
                 cls_score_4 = self.classifier_4(local_feat_4_bn)
-            return [cls_score, cls_score_1, cls_score_2, cls_score_3,
-                        cls_score_4
-                        ], [global_feat, local_feat_1, local_feat_2, local_feat_3,
-                            local_feat_4]  # global feature for triplet loss
+            scores = [cls_score, cls_score_1, cls_score_2, cls_score_3, cls_score_4]
+            features = [global_feat, local_feat_1, local_feat_2, local_feat_3, local_feat_4]
+            if self.camera_branch_enabled:
+                return scores, features, camera_score
+            return scores, features  # global and local features for triplet loss
         else:
             if self.neck_feat == 'after':
                 return torch.cat(

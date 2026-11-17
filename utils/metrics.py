@@ -9,7 +9,7 @@ def euclidean_distance(qf, gf):
     n = gf.shape[0]
     dist_mat = torch.pow(qf, 2).sum(dim=1, keepdim=True).expand(m, n) + \
                torch.pow(gf, 2).sum(dim=1, keepdim=True).expand(n, m).t()
-    dist_mat.addmm_(1, -2, qf, gf.t())
+    dist_mat.addmm_(qf, gf.t(), beta=1, alpha=-2)
     return dist_mat.cpu().numpy()
 
 def cosine_similarity(qf, gf):
@@ -25,7 +25,8 @@ def cosine_similarity(qf, gf):
     return dist_mat
 
 
-def eval_func(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
+def eval_func(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50,
+              return_num_valid=False):
     """Evaluation with market1501 metric
         Key: for each query identity, its gallery images from the same camera view are discarded.
         """
@@ -78,12 +79,16 @@ def eval_func(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
         AP = tmp_cmc.sum() / num_rel
         all_AP.append(AP)
 
+    if num_valid_q == 0 and return_num_valid:
+        return np.zeros(max_rank, dtype=np.float32), 0., 0
     assert num_valid_q > 0, "Error: all query identities do not appear in gallery"
 
     all_cmc = np.asarray(all_cmc).astype(np.float32)
     all_cmc = all_cmc.sum(0) / num_valid_q
     mAP = np.mean(all_AP)
 
+    if return_num_valid:
+        return all_cmc, mAP, int(num_valid_q)
     return all_cmc, mAP
 
 
@@ -106,7 +111,7 @@ class R1_mAP_eval():
         self.pids.extend(np.asarray(pid))
         self.camids.extend(np.asarray(camid))
 
-    def compute(self):  # called after each epoch
+    def compute(self, return_distmat=True, query_chunk_size=128):
         feats = torch.cat(self.feats, dim=0)
         if self.feat_norm:
             print("The test feature is normalized")
@@ -126,9 +131,25 @@ class R1_mAP_eval():
             distmat = re_ranking(qf, gf, k1=50, k2=15, lambda_value=0.3)
 
         else:
+            if not return_distmat:
+                # Keep MSMT17 evaluation within host RAM without changing its protocol.
+                cmc_sum = np.zeros(min(self.max_rank, len(gf)), dtype=np.float64)
+                ap_sum, valid_queries = 0., 0
+                for start in range(0, len(qf), query_chunk_size):
+                    stop = start + query_chunk_size
+                    block = euclidean_distance(qf[start:stop], gf)
+                    cmc, mAP, count = eval_func(
+                        block, q_pids[start:stop], g_pids, q_camids[start:stop],
+                        g_camids, self.max_rank, return_num_valid=True)
+                    cmc_sum += cmc * count
+                    ap_sum += mAP * count
+                    valid_queries += count
+                assert valid_queries > 0, 'Error: all query identities do not appear in gallery'
+                return (cmc_sum / valid_queries, ap_sum / valid_queries, None,
+                        self.pids, self.camids, qf, gf)
             print('=> Computing DistMat with euclidean_distance')
             distmat = euclidean_distance(qf, gf)
-        cmc, mAP = eval_func(distmat, q_pids, g_pids, q_camids, g_camids)
+        cmc, mAP = eval_func(distmat, q_pids, g_pids, q_camids, g_camids, self.max_rank)
 
         return cmc, mAP, distmat, self.pids, self.camids, qf, gf
 
