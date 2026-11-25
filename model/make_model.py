@@ -3,6 +3,8 @@ import torch.nn as nn
 from .backbones.resnet import ResNet, Bottleneck
 import copy
 from .backbones.vit_pytorch import vit_base_patch16_224_TransReID, vit_small_patch16_224_TransReID, deit_small_patch16_224_TransReID
+from .patch_reliability import PatchReliabilityHead, masks_to_patch_targets
+from .r3_grouping import ReliabilityGuidedGrouping
 from loss.metric_learning import Arcface, Cosface, AMSoftmax, CircleLoss
 
 def shuffle_unit(features, shift, group, begin=1):
@@ -305,42 +307,61 @@ class build_transformer_local(nn.Module):
         print('using divide_length size:{}'.format(self.divide_length))
         self.rearrange = rearrange
 
-    def forward(self, x, label=None, cam_label= None, view_label=None):  # label is unused if self.cos_layer == 'no'
+        self.patch_reliability_head = None
+        if cfg.MODEL.PATCH_RELIABILITY:
+            # Keep the shared JPM initialization and CPU RNG state aligned with R1.
+            with torch.random.fork_rng(devices=[]):
+                self.patch_reliability_head = PatchReliabilityHead(
+                    in_dim=self.in_planes, hidden_dim=cfg.MODEL.PATCH_REL_HIDDEN_DIM,
+                )
 
+        self.adaptive_grouping = None
+        if cfg.MODEL.ADAPTIVE_GROUPING:
+            with torch.random.fork_rng(devices=[]):
+                self.adaptive_grouping = ReliabilityGuidedGrouping(
+                    dim=self.in_planes, reliability_floor=cfg.MODEL.GROUP_RELIABILITY_FLOOR,
+                )
+            # Preserve the R2 block in checkpoints and reuse its local LayerNorm after pooling.
+            self.b2[0].requires_grad_(False)
+
+    def patch_masks_to_targets(self, body_mask, umbrella_mask):
+        return masks_to_patch_targets(body_mask, umbrella_mask, self.base.patch_embed.proj)
+
+    def predict_patch_reliability(self, x, cam_label=None, view_label=None):
+        """Return body and umbrella logits for the original patch grid."""
+        if self.patch_reliability_head is None:
+            raise RuntimeError('Patch reliability prediction requires MODEL.PATCH_RELIABILITY.')
         features = self.base(x, cam_label=cam_label, view_label=view_label)
+        return self.patch_reliability_head(features[:, 1:])
 
-        # global branch
-        b1_feat = self.b1(features) # [64, 129, 768]
-        global_feat = b1_feat[:, 0]
-
-        # JPM branch
+    def _original_jpm_features(self, features):
         feature_length = features.size(1) - 1
         patch_length = feature_length // self.divide_length
         token = features[:, 0:1]
-
         if self.rearrange:
-            x = shuffle_unit(features, self.shift_num, self.shuffle_groups)
+            local_tokens = shuffle_unit(features, self.shift_num, self.shuffle_groups)
         else:
-            x = features[:, 1:]
-        # lf_1
-        b1_local_feat = x[:, :patch_length]
-        b1_local_feat = self.b2(torch.cat((token, b1_local_feat), dim=1))
-        local_feat_1 = b1_local_feat[:, 0]
+            local_tokens = features[:, 1:]
+        return tuple(
+            self.b2(torch.cat((token, local_tokens[:, i * patch_length:(i + 1) * patch_length]), dim=1))[:, 0]
+            for i in range(4)
+        )
 
-        # lf_2
-        b2_local_feat = x[:, patch_length:patch_length*2]
-        b2_local_feat = self.b2(torch.cat((token, b2_local_feat), dim=1))
-        local_feat_2 = b2_local_feat[:, 0]
+    def forward(self, x, label=None, cam_label=None, view_label=None, return_grouping=False):
+        if return_grouping and (self.training or self.adaptive_grouping is None):
+            raise ValueError('Grouping diagnostics require adaptive grouping in eval mode.')
+        features = self.base(x, cam_label=cam_label, view_label=view_label)
+        global_feat = self.b1(features)[:, 0]
 
-        # lf_3
-        b3_local_feat = x[:, patch_length*2:patch_length*3]
-        b3_local_feat = self.b2(torch.cat((token, b3_local_feat), dim=1))
-        local_feat_3 = b3_local_feat[:, 0]
-
-        # lf_4
-        b4_local_feat = x[:, patch_length*3:patch_length*4]
-        b4_local_feat = self.b2(torch.cat((token, b4_local_feat), dim=1))
-        local_feat_4 = b4_local_feat[:, 0]
+        if self.adaptive_grouping is None:
+            local_feat_1, local_feat_2, local_feat_3, local_feat_4 = self._original_jpm_features(features)
+        else:
+            patch_tokens = features[:, 1:]
+            patch_logits = self.patch_reliability_head(patch_tokens)
+            # Patch BCE supervises the prior. Identity and balance losses train grouping via the tokens.
+            body_reliability = patch_logits[..., 0].detach().float().sigmoid()
+            local_features, attention = self.adaptive_grouping(patch_tokens, body_reliability)
+            local_feat_1, local_feat_2, local_feat_3, local_feat_4 = self.b2[-1](local_features).unbind(dim=1)
 
         feat = self.bottleneck(global_feat)
 
@@ -358,22 +379,64 @@ class build_transformer_local(nn.Module):
                 cls_score_2 = self.classifier_2(local_feat_2_bn)
                 cls_score_3 = self.classifier_3(local_feat_3_bn)
                 cls_score_4 = self.classifier_4(local_feat_4_bn)
-            return [cls_score, cls_score_1, cls_score_2, cls_score_3,
-                        cls_score_4
-                        ], [global_feat, local_feat_1, local_feat_2, local_feat_3,
-                            local_feat_4]  # global feature for triplet loss
+            scores = [cls_score, cls_score_1, cls_score_2, cls_score_3, cls_score_4]
+            id_features = [global_feat, local_feat_1, local_feat_2, local_feat_3, local_feat_4]
+            if self.adaptive_grouping is not None:
+                return scores, id_features, patch_logits, attention
+            if self.patch_reliability_head is not None:
+                # The original sequence still has raster order after JPM shuffles a copy.
+                patch_logits = self.patch_reliability_head(features[:, 1:])
+                return scores, id_features, patch_logits
+            return scores, id_features
+
+        if self.neck_feat == 'after':
+            embedding = torch.cat(
+                [feat, local_feat_1_bn / 4, local_feat_2_bn / 4, local_feat_3_bn / 4, local_feat_4_bn / 4], dim=1)
         else:
-            if self.neck_feat == 'after':
-                return torch.cat(
-                    [feat, local_feat_1_bn / 4, local_feat_2_bn / 4, local_feat_3_bn / 4, local_feat_4_bn / 4], dim=1)
-            else:
-                return torch.cat(
-                    [global_feat, local_feat_1 / 4, local_feat_2 / 4, local_feat_3 / 4, local_feat_4 / 4], dim=1)
+            embedding = torch.cat(
+                [global_feat, local_feat_1 / 4, local_feat_2 / 4, local_feat_3 / 4, local_feat_4 / 4], dim=1)
+        if return_grouping:
+            return embedding, attention, body_reliability
+        return embedding
+
+    @staticmethod
+    def _read_checkpoint(trained_path):
+        state = torch.load(trained_path, map_location='cpu', weights_only=True)
+        tensors = {key.removeprefix('module.'): value for key, value in state.items()}
+        if len(tensors) != len(state):
+            raise ValueError(f'Checkpoint has duplicate parameter names: {trained_path}')
+        return tensors
+
+    def load_r2_param(self, trained_path):
+        """Initialize every shared tensor from a complete R2 checkpoint."""
+        if self.patch_reliability_head is None:
+            raise ValueError('Loading R2 weights requires MODEL.PATCH_RELIABILITY.')
+        state = self._read_checkpoint(trained_path)
+        expected = {
+            key: value for key, value in self.state_dict().items()
+            if not key.startswith('adaptive_grouping.')
+        }
+        missing = expected.keys() - state.keys()
+        unexpected = state.keys() - expected.keys()
+        mismatched = [
+            key for key in expected.keys() & state.keys()
+            if not isinstance(state[key], torch.Tensor) or state[key].shape != expected[key].shape
+        ]
+        if missing or unexpected or mismatched:
+            raise ValueError(
+                f'Incompatible R2 checkpoint {trained_path}. Missing: {sorted(missing)}. '
+                f'Unexpected: {sorted(unexpected)}. Mismatched tensor shapes: {sorted(mismatched)}.'
+            )
+        self.load_state_dict(state, strict=False)
+        print(f'Loaded R2 initialization from {trained_path}')
 
     def load_param(self, trained_path):
-        param_dict = torch.load(trained_path)
-        for i in param_dict:
-            self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
+        if self.adaptive_grouping is not None:
+            self.load_state_dict(self._read_checkpoint(trained_path), strict=True)
+        else:
+            param_dict = torch.load(trained_path)
+            for i in param_dict:
+                self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
         print('Loading pretrained model from {}'.format(trained_path))
 
     def load_param_finetune(self, model_path):
@@ -391,6 +454,10 @@ __factory_T_type = {
 }
 
 def make_model(cfg, num_class, camera_num, view_num):
+    if cfg.MODEL.ADAPTIVE_GROUPING and not cfg.MODEL.PATCH_RELIABILITY:
+        raise ValueError('MODEL.ADAPTIVE_GROUPING requires MODEL.PATCH_RELIABILITY.')
+    if cfg.MODEL.PATCH_RELIABILITY and (cfg.MODEL.NAME != 'transformer' or not cfg.MODEL.JPM):
+        raise ValueError('MODEL.PATCH_RELIABILITY requires the transformer with MODEL.JPM enabled.')
     if cfg.MODEL.NAME == 'transformer':
         if cfg.MODEL.JPM:
             model = build_transformer_local(num_class, camera_num, view_num, cfg, __factory_T_type, rearrange=cfg.MODEL.RE_ARRANGE)

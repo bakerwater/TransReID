@@ -27,7 +27,7 @@ _C.MODEL.LAST_STRIDE = 1
 _C.MODEL.PRETRAIN_PATH = ''
 
 # Use ImageNet pretrained model to initialize backbone or use self trained model to initialize the whole model
-# Options: 'imagenet' , 'self' , 'finetune'
+# Options: 'imagenet', 'self', 'finetune', 'r2_checkpoint'
 _C.MODEL.PRETRAIN_CHOICE = 'imagenet'
 
 # If train with BNNeck, options: 'bnneck' or 'no'
@@ -63,6 +63,18 @@ _C.MODEL.SHUFFLE_GROUP = 2
 _C.MODEL.DEVIDE_LENGTH = 4
 _C.MODEL.RE_ARRANGE = True
 
+# Patch reliability supervision for JPM
+_C.MODEL.PATCH_RELIABILITY = False
+_C.MODEL.PATCH_REL_HIDDEN_DIM = 256
+_C.MODEL.PATCH_REL_LOSS_WEIGHT = 0.2
+_C.MODEL.PATCH_REL_UMBRELLA_WEIGHT = 1.0
+
+# Reliability-guided adaptive grouping
+_C.MODEL.ADAPTIVE_GROUPING = False
+_C.MODEL.GROUP_RELIABILITY_FLOOR = 0.05
+_C.MODEL.GROUP_BALANCE_WEIGHT = 0.05
+_C.MODEL.GROUP_MIN_EFFECTIVE_PATCHES = 8.0
+
 # SIE Parameter
 _C.MODEL.SIE_COE = 3.0
 _C.MODEL.SIE_CAMERA = False
@@ -95,6 +107,8 @@ _C.DATASETS = CN()
 _C.DATASETS.NAMES = ('market1501')
 # Root directory where datasets should be used (and downloaded if not found)
 _C.DATASETS.ROOT_DIR = ('../data')
+_C.DATASETS.RELIABILITY_ANNOTATION = ''
+_C.DATASETS.RELIABILITY_MASK_ROOT = ''
 
 
 # -----------------------------------------------------------------------------

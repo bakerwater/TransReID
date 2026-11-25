@@ -1,0 +1,65 @@
+MODEL:
+  NAME: 'transformer'
+  TRANSFORMER_TYPE: 'vit_base_patch16_224_TransReID'
+  STRIDE_SIZE: [16, 16]
+  DEVICE_ID: "('0')"
+  PRETRAIN_CHOICE: 'imagenet'
+  PRETRAIN_PATH: '../../TransReID/pretrained/jx_vit_base_p16_224-80ecf9dd.pth'
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NO_MARGIN: True
+  SIE_CAMERA: False
+  SIE_VIEW: False
+  JPM: True
+  RE_ARRANGE: True
+  PATCH_RELIABILITY: True
+  PATCH_REL_HIDDEN_DIM: 256
+  PATCH_REL_LOSS_WEIGHT: 0.2
+  PATCH_REL_UMBRELLA_WEIGHT: 1.0
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5
+  RE_PROB: 0.5
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+
+DATASETS:
+  NAMES: 'rainreid'
+  ROOT_DIR: 'data'
+  RELIABILITY_ANNOTATION: 'data/RainReID/reliability_head/patch_masks.csv'
+  RELIABILITY_MASK_ROOT: 'data/RainReID'
+
+DATALOADER:
+  SAMPLER: 'softmax_triplet'
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 8
+
+SOLVER:
+  OPTIMIZER_NAME: 'SGD'
+  SEED: 1234
+  MAX_EPOCHS: 120
+  BASE_LR: 0.008
+  IMS_PER_BATCH: 64
+  WARMUP_METHOD: 'linear'
+  WARMUP_EPOCHS: 5
+  LARGE_FC_LR: False
+  CHECKPOINT_PERIOD: 20
+  LOG_PERIOD: 25
+  EVAL_PERIOD: 20
+  WEIGHT_DECAY: 1e-4
+  WEIGHT_DECAY_BIAS: 1e-4
+  BIAS_LR_FACTOR: 2
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: 'outputs/rainreid/r2_reliability/transformer_120.pth'
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: 'outputs/rainreid/r2_reliability'
